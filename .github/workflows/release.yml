@@ -61,7 +61,8 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Build application bundles
+        - name: Build application bundles
+        working-directory: src-tauri
         run: cargo tauri build --bundles ${{ matrix.bundles }}
         env:
           NO_STRIP: "true"
