@@ -1,0 +1,123 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+            platform: windows
+            artifact_name: api-vault-windows-x64
+            bundles: nsis
+          - os: ubuntu-22.04
+            label: Linux x64
+            platform: linux
+            artifact_name: api-vault-linux-x64
+            bundles: deb,appimage
+          - os: macos-latest
+            label: macOS Apple Silicon
+            platform: macos-arm64
+            artifact_name: api-vault-macos-arm64
+            bundles: dmg
+          - os: macos-15-intel
+            label: macOS Intel
+            platform: macos-x64
+            artifact_name: api-vault-macos-x64
+            bundles: dmg
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file patchelf libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build files
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build application bundles
+        run: cargo tauri build --bundles ${{ matrix.bundles }}
+        env:
+          NO_STRIP: "true"
+
+      - name: Collect Windows installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer was not generated." }
+          Copy-Item $installer.FullName "dist/API-Vault-windows-x64-setup.exe"
+          Copy-Item "src-tauri/target/release/api-vault.exe" "dist/API-Vault-windows-x64-portable.exe"
+
+      - name: Collect Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          deb_file=$(find src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print -quit)
+          appimage_file=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print -quit)
+          test -n "$deb_file" || { echo "DEB package was not generated."; exit 1; }
+          test -n "$appimage_file" || { echo "AppImage was not generated."; exit 1; }
+          cp "$deb_file" dist/API-Vault-linux-x64.deb
+          cp "$appimage_file" dist/API-Vault-linux-x64.AppImage
+
+      - name: Collect macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          dmg_file=$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          test -n "$dmg_file" || { echo "DMG package was not generated."; exit 1; }
+          cp "$dmg_file" "dist/API-Vault-${{ matrix.platform }}.dmg"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages from all platforms
+        uses: actions/download-artifact@v4
+        with:
+          pattern: api-vault-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release and attach packages
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
